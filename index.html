@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SATELLITE TRACKER v12</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; background: #000; overflow: hidden; font-family: 'Courier New', sans-serif; }
+        #map { height: 100%; width: 100%; z-index: 1; background: #0b141a; }
+
+        /* Вход */
+        #login-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95); z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; color: #0f0;
+        }
+        h1 { letter-spacing: 3px; margin-bottom: 30px; text-shadow: 0 0 10px #0f0; text-align: center; }
+        input.login-input { background: #111; border: 2px solid #0f0; color: #0f0; padding: 15px; font-size: 20px; text-align: center; width: 250px; margin-bottom: 20px; outline: none; border-radius: 5px; }
+        button.login-btn { background: #0f0; color: #000; border: none; padding: 15px 40px; font-size: 18px; cursor: pointer; font-weight: bold; border-radius: 5px; }
+
+        /* Кнопки управления */
+        .controls-container { position: fixed; bottom: 100px; right: 20px; z-index: 1000; display: none; flex-direction: column; gap: 15px; }
+        .control-btn { width: 55px; height: 55px; background: rgba(0, 255, 0, 0.2); border: 2px solid #0f0; border-radius: 50%; color: #0f0; font-size: 26px; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); box-shadow: 0 0 10px rgba(0,255,0,0.3); }
+
+        /* Чат */
+        #chat-bar {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            width: 90%; max-width: 450px; z-index: 1000; display: none;
+            background: rgba(0, 0, 0, 0.85); padding: 12px; border-radius: 35px; border: 1px solid #0f0;
+            align-items: center; justify-content: space-between; box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #chat-input { background: transparent; border: none; color: #fff; font-size: 16px; width: 80%; outline: none; padding-left: 15px; font-family: sans-serif; }
+        #send-btn { background: #0f0; border: none; color: #000; font-weight: bold; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+
+        /* Метки и пузыри */
+        .name-label { background: rgba(0,0,0,0.8); border: 1px solid #0f0; color: #0f0; font-weight: bold; padding: 3px 10px; border-radius: 4px; font-size: 13px; pointer-events: none; white-space: nowrap; }
+        .chat-bubble { background: #fff; color: #000; border: 2px solid #0f0; font-weight: bold; padding: 6px 14px; font-size: 15px; border-radius: 18px; white-space: nowrap; box-shadow: 0 0 15px #0f0; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h1>SATELLITE TRACKER V12</h1>
+        <input type="text" id="username" class="login-input" placeholder="ПОЗЫВНОЙ" autocomplete="off">
+        <button class="login-btn" onclick="startApp()">ВХОД В СИСТЕМУ</button>
+    </div>
+
+    <div class="controls-container" id="controls">
+        <div class="control-btn" onclick="toggleFullScreen()" title="Полный экран">⛶</div>
+        <div class="control-btn" onclick="reCenterMap()" title="Найти меня">⌖</div>
+    </div>
+
+    <div id="chat-bar">
+        <input type="text" id="chat-input" placeholder="Введите сообщение..." autocomplete="off">
+        <button id="send-btn" onclick="sendMessage()">➤</button>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        const socket = io();
+        let myName = "", map, markers = {}, timers = {}, audioCtx, firstLoad = true, myLat = 0, myLng = 0;
+        const worldBounds = [[-90, -180], [90, 180]];
+
+        // Инициализация карты
+        map = L.map('map', { 
+            zoomControl: false, 
+            maxZoom: 20, 
+            minZoom: 3, 
+            maxBounds: worldBounds, 
+            maxBoundsViscosity: 1.0,
+            preferCanvas: true
+        }).setView([0, 0], 3);
+
+        // --- GOOGLE MAPS LAYERS (ULTRA HD) ---
+        // Слой спутника с поддержкой Retina для четкости на телефонах
+        L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+            maxZoom: 20, 
+            subdomains:['mt0','mt1','mt2','mt3'], 
+            noWrap: true, 
+            bounds: worldBounds,
+            detectRetina: true, // Убирает пиксельность на телефонах
+            keepBuffer: 10
+        }).addTo(map);
+
+        // Слой гибридных надписей (дороги + города)
+        L.tileLayer('https://{s}.google.com/vt/lyrs=h&x={x}&y={y}&z={z}', {
+            maxZoom: 20, 
+            subdomains:['mt0','mt1','mt2','mt3'], 
+            noWrap: true, 
+            bounds: worldBounds,
+            detectRetina: true,
+            opacity: 1.0
+        }).addTo(map);
+
+        // Звук рации
+        function playRadioStatic() {
+            if (!audioCtx) return;
+            const bufferSize = audioCtx.sampleRate * 0.4;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = audioCtx.createBufferSource(); noise.buffer = buffer;
+            const gainNode = audioCtx.createGain(); gainNode.gain.setValueAtTime(0.04, audioCtx.currentTime);
+            noise.connect(gainNode); gainNode.connect(audioCtx.destination);
+            noise.start();
+        }
+
+        function startApp() {
+            const input = document.getElementById('username');
+            if (!input.value) return alert("ВВЕДИТЕ ПОЗЫВНОЙ!");
+            myName = input.value;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('controls').style.display = 'flex';
+            document.getElementById('chat-bar').style.display = 'flex';
+            toggleFullScreen();
+
+            if (navigator.geolocation) {
+                navigator.geolocation.watchPosition((pos) => {
+                    myLat = pos.coords.latitude; 
+                    myLng = pos.coords.longitude;
+                    let speedKmH = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
+                    
+                    if (firstLoad) { reCenterMap(); firstLoad = false; }
+                    
+                    socket.emit('sendLocation', { lat: myLat, lng: myLng, name: myName, speed: speedKmH });
+                    updateMarker('me', myLat, myLng, myName + " (ВЫ)", speedKmH);
+                }, (err) => alert("ВКЛЮЧИТЕ GPS И ДАЙТЕ РАЗРЕШЕНИЕ!"), { enableHighAccuracy: true });
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('chat-input');
+            if (input.value.trim()) { 
+                socket.emit('sendMessage', input.value.trim()); 
+                input.value = ""; 
+            }
+        }
+        document.getElementById('chat-input').addEventListener("keypress", (e) => { if (e.key === "Enter") sendMessage(); });
+
+        socket.on('newMessage', (data) => {
+            const id = (data.id === socket.id) ? 'me' : data.id;
+            playRadioStatic(); 
+            if (markers[id]) {
+                markers[id].unbindTooltip();
+                markers[id].bindTooltip(data.text, { permanent: true, direction: 'top', className: 'chat-bubble' }).openTooltip();
+                if (timers[id]) clearTimeout(timers[id]);
+                timers[id] = setTimeout(() => {
+                    updateMarker(id, markers[id].getLatLng().lat, markers[id].getLatLng().lng, (id === 'me' ? myName + " (ВЫ)" : data.name), 0);
+                    delete timers[id];
+                }, 5000);
+            }
+        });
+
+        function toggleFullScreen() { 
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(e=>{});
+            }
+        }
+        
+        function reCenterMap() { if (myLat !== 0) map.setView([myLat, myLng], 18); }
+        
+        socket.on('receiveLocation', (d) => updateMarker(d.id, d.lat, d.lng, d.name, d.speed));
+        socket.on('currentUsers', (u) => Object.values(u).forEach(x => { if (x.id !== socket.id) updateMarker(x.id, x.lat, x.lng, x.name, x.speed); }));
+        socket.on('userDisconnected', (id) => { if (markers[id]) { map.removeLayer(markers[id]); delete markers[id]; } });
+
+        function updateMarker(id, lat, lng, name, speed) {
+            let labelText = (speed && speed > 0) ? `${name} [${speed} КМ/Ч]` : name;
+            if (markers[id]) {
+                markers[id].setLatLng([lat, lng]);
+                if (!timers[id]) markers[id].setTooltipContent(labelText);
+            } else {
+                markers[id] = L.marker([lat, lng]).addTo(map).bindTooltip(labelText, { permanent: true, direction: 'top', className: 'name-label' });
+            }
+        }
+    </script>
+</body>
+</html>
